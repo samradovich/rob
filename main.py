@@ -1,608 +1,469 @@
-import plotly.graph_objects as go
-from dash import Dash, dcc, html, Input, Output, ctx
 import numpy as np
 import pandas as pd
+import plotly.graph_objects as go
+from dash import Dash, dcc, html, Input, Output
+import dash
 
-def calculate_mortgage_payment(principal, annual_rate, years):
-    """
-    Calculate the fixed monthly mortgage payment using the standard amortization formula.
-    
-    The formula used is: PMT = P * (r(1+r)^n)/((1+r)^n-1)
-    Where:
-    - PMT = Monthly Payment
-    - P = Principal (loan amount)
-    - r = Monthly Interest Rate (annual rate / 12)
-    - n = Total Number of Months (years * 12)
-    
-    Learn more: https://www.bankrate.com/mortgages/mortgage-calculator/
-    
-    Args:
-        principal (float): The loan amount
-        annual_rate (float): Annual interest rate as decimal (e.g., 0.05 for 5%)
-        years (int): Loan term in years
-    
-    Returns:
-        float: Fixed monthly payment amount
-    """
-    r = annual_rate / 12  # Convert annual rate to monthly
-    n = years * 12        # Convert years to months
-    return principal * (r * (1 + r)**n) / ((1 + r)**n - 1)
+# Constants for Gruvbox theme
+COLORS = {
+    'background': '#282828',
+    'surface': '#3c3836',
+    'text': '#ebdbb2',
+    'green': '#b8bb26',
+    'blue': '#83a598',
+    'red': '#fb4934',
+    'yellow': '#fabd2f'
+}
 
-def calculate_mortgage_data(principal, annual_rate, years, monthly_payment):
+def calculate_buy_vs_rent(
+    # Basic inputs
+    home_price=375000,
+    monthly_rent=2000,
+    years=30,
+    # Mortgage details
+    down_payment_pct=20,
+    mortgage_rate=6.5,
+    mortgage_term=30,
+    pmi_rate=0.5,
+    # Future projections
+    home_appreciation=3,
+    rent_appreciation=3,
+    investment_return=7,
+    inflation=2,
+    # Tax details
+    property_tax_rate=1.5,
+    marginal_tax_rate=25,
+    filing_status="individual",
+    other_itemized_deductions=0,
+    # Closing costs
+    buying_closing_cost_pct=4,
+    selling_closing_cost_pct=6,
+    # Maintenance and fees
+    maintenance_pct=1,
+    homeowners_insurance_pct=0.5,
+    extra_utilities=200,
+    hoa_fees=0,
+    hoa_tax_deductible_pct=0,
+    # Rental costs
+    security_deposit_months=1,
+    rental_broker_fee_pct=0,
+    renters_insurance_pct=0.5
+):
     """
-    Calculate complete mortgage amortization schedule data.
-    
-    For each payment period:
-    1. Interest = Previous Balance * Monthly Rate
-    2. Principal Paid = Monthly Payment - Interest
-    3. New Balance = Previous Balance - Principal Paid
-    
-    Learn more: https://www.investopedia.com/terms/a/amortization.asp
-    
-    Args:
-        principal (float): Initial loan amount
-        annual_rate (float): Annual interest rate as decimal
-        years (int): Loan term in years
-        monthly_payment (float): Fixed monthly payment amount
-    
-    Returns:
-        tuple: (months, balance, interest_paid, cumulative_payments)
-        - months: Array of payment periods
-        - balance: Array of remaining principal balance
-        - interest_paid: Array of cumulative interest paid
-        - cumulative_payments: Array of total payments made
+    Calculate comprehensive buy vs rent comparison over time.
+    Based on NYT calculator methodology.
     """
-    monthly_rate = annual_rate / 12
-    n_payments = years * 12
+    # Convert percentages to decimals
+    down_payment = home_price * (down_payment_pct / 100)
+    mortgage_rate = mortgage_rate / 100
+    home_appreciation = home_appreciation / 100
+    rent_appreciation = rent_appreciation / 100
+    investment_return = investment_return / 100
+    inflation = inflation / 100
     
-    months = np.arange(n_payments + 1)
-    balance = np.zeros(n_payments + 1)
-    interest_paid = np.zeros(n_payments + 1)
+    # Calculate monthly periods
+    months = np.arange(years * 12 + 1)
     
-    balance[0] = principal
+    # BUYING SCENARIO
+    # Initial costs
+    loan_amount = home_price - down_payment
+    buying_closing_costs = home_price * (buying_closing_cost_pct / 100)
+    initial_buy_costs = down_payment + buying_closing_costs
     
-    for i in range(1, n_payments + 1):
+    # Monthly mortgage payment
+    monthly_rate = mortgage_rate / 12
+    n_payments = mortgage_term * 12
+    monthly_payment = (loan_amount * 
+                      (monthly_rate * (1 + monthly_rate)**n_payments) / 
+                      ((1 + monthly_rate)**n_payments - 1))
+    
+    # Calculate amortization schedule
+    balance = np.zeros(len(months))
+    interest_paid = np.zeros(len(months))
+    balance[0] = loan_amount
+    
+    for i in range(1, len(months)):
         interest = balance[i-1] * monthly_rate
-        principal_paid = monthly_payment - interest
-        balance[i] = balance[i-1] - principal_paid
+        principal = monthly_payment - interest
+        balance[i] = balance[i-1] - principal
         interest_paid[i] = interest_paid[i-1] + interest
     
-    cumulative_payments = months * monthly_payment
-    return months, balance, interest_paid, cumulative_payments
-
-def calculate_investment_growth(monthly_investment, initial_investment, annual_return, months):
-    """
-    Calculate growth of regular investments with compound interest.
+    # PMI (if down payment < 20%)
+    pmi_payments = np.zeros(len(months))
+    if down_payment_pct < 20:
+        pmi_monthly_rate = pmi_rate / 100 / 12
+        pmi_payments = np.where(balance / home_price > 0.8, 
+                              balance * pmi_monthly_rate, 0)
     
-    This function models:
-    1. Initial investment growing with compound interest
-    2. Regular monthly contributions also growing with compound interest
-    3. New contributions made at the end of each month
+    # Property taxes and insurance
+    home_values = home_price * (1 + home_appreciation)**(months/12)
+    property_tax = home_values * (property_tax_rate / 100 / 12)
+    homeowners_insurance = home_values * (homeowners_insurance_pct / 100 / 12)
     
-    Uses the compound interest formula with regular contributions:
-    FV = P(1 + r)^t + PMT * [((1 + r)^t - 1) / r]
-    Where:
-    - FV = Future Value
-    - P = Principal (initial_investment)
-    - PMT = Regular Payment (monthly_investment)
-    - r = Monthly Interest Rate
-    - t = Time in months
+    # Maintenance and utilities
+    maintenance = home_values * (maintenance_pct / 100 / 12)
+    utilities = extra_utilities * (1 + inflation)**(months/12)
+    hoa = hoa_fees * np.ones(len(months))
     
-    Learn more: https://www.investopedia.com/terms/c/compoundinterest.asp
+    # Tax deductions
+    standard_deduction = 13850 if filing_status == "individual" else 27700  # 2023 values
+    itemized_deductions = (interest_paid + 
+                          np.cumsum(property_tax) + 
+                          hoa * (hoa_tax_deductible_pct / 100) +
+                          other_itemized_deductions)
+    tax_savings = np.maximum(0, itemized_deductions - standard_deduction) * (marginal_tax_rate / 100)
     
-    Args:
-        monthly_investment (float): Regular monthly contribution amount
-        initial_investment (float): Starting investment amount
-        annual_return (float): Annual return rate as decimal
-        months (int): Number of months to calculate
+    # RENTING SCENARIO
+    # Initial costs
+    security_deposit = monthly_rent * security_deposit_months
+    broker_fee = monthly_rent * 12 * (rental_broker_fee_pct / 100)
+    initial_rent_costs = security_deposit + broker_fee
     
-    Returns:
-        numpy.array: Array of investment values over time
-    """
-    monthly_rate = annual_return / 12
-    investment_value = np.zeros(months + 1)
-    investment_value[0] = initial_investment
+    # Monthly rent with appreciation
+    monthly_rents = monthly_rent * (1 + rent_appreciation)**(months/12)
+    renters_insurance = monthly_rent * 12 * (renters_insurance_pct / 100 / 12)
     
-    for i in range(1, months + 1):
-        # Previous balance grows for one month
-        investment_value[i] = investment_value[i-1] * (1 + monthly_rate)
-        # Add new monthly investment
-        investment_value[i] += monthly_investment
+    # Investment returns (on down payment difference)
+    investment_base = initial_buy_costs - initial_rent_costs
+    monthly_investment = (monthly_payment + 
+                         pmi_payments + 
+                         property_tax + 
+                         homeowners_insurance +
+                         maintenance + 
+                         utilities + 
+                         hoa - 
+                         monthly_rents - 
+                         renters_insurance)
     
-    return investment_value
-
-def calculate_home_value(initial_value, annual_appreciation, months):
-    """
-    Calculate home value appreciation over time using compound growth.
+    investment_value = np.zeros(len(months))
+    investment_value[0] = investment_base
     
-    Uses continuous compound growth formula: FV = PV * (1 + r)^t
-    Where:
-    - FV = Future Value
-    - PV = Present Value (initial_value)
-    - r = Monthly appreciation rate
-    - t = Number of months
+    for i in range(1, len(months)):
+        investment_value[i] = (investment_value[i-1] * (1 + investment_return/12) + 
+                             monthly_investment[i-1])
     
-    Learn more: https://www.investopedia.com/terms/r/real-estate-appreciation.asp
+    # Final selling costs
+    final_selling_costs = home_values * (selling_closing_cost_pct / 100)
     
-    Args:
-        initial_value (float): Starting home value
-        annual_appreciation (float): Annual appreciation rate as decimal
-        months (int): Number of months to calculate
+    # Calculate net worth for both scenarios
+    buying_net_worth = (home_values - 
+                       balance - 
+                       np.cumsum(pmi_payments) -
+                       np.cumsum(property_tax) -
+                       np.cumsum(homeowners_insurance) -
+                       np.cumsum(maintenance) -
+                       np.cumsum(utilities) -
+                       np.cumsum(hoa) +
+                       tax_savings -
+                       final_selling_costs)
     
-    Returns:
-        numpy.array: Array of home values over time
-    """
-    monthly_rate = annual_appreciation / 12
-    values = np.zeros(months + 1)
-    values[0] = initial_value
+    renting_net_worth = (investment_value - 
+                        np.cumsum(monthly_rents) - 
+                        np.cumsum(renters_insurance))
     
-    for i in range(1, months + 1):
-        values[i] = values[i-1] * (1 + monthly_rate)
+    # Create time series for plotting
+    dates = [pd.Timestamp.now() + pd.DateOffset(months=int(m)) for m in months]
     
-    return values
-
-def calculate_monthly_rent(initial_rent, annual_increase, months):
-    """
-    Calculate monthly rent amounts accounting for annual increases.
+    # Create the plot
+    fig = go.Figure()
     
-    Rent typically increases yearly rather than monthly. This function:
-    1. Maintains constant rent within each year
-    2. Applies increase at each 12-month mark
-    3. Uses compound growth for yearly increases
+    fig.add_trace(go.Scatter(
+        x=dates,
+        y=buying_net_worth,
+        name='Buying Net Worth',
+        mode='lines',
+        line=dict(color=COLORS['green'], width=1.5)
+    ))
     
-    Learn more: https://www.investopedia.com/terms/r/rental-real-estate-loss-allowance.asp
+    fig.add_trace(go.Scatter(
+        x=dates,
+        y=renting_net_worth,
+        name='Renting Net Worth',
+        mode='lines',
+        line=dict(color=COLORS['blue'], width=1.5)
+    ))
     
-    Args:
-        initial_rent (float): Starting monthly rent
-        annual_increase (float): Annual rent increase as decimal
-        months (int): Number of months to calculate
+    fig.add_trace(go.Scatter(
+        x=dates,
+        y=buying_net_worth - renting_net_worth,
+        name='Buy vs Rent Advantage',
+        mode='lines',
+        line=dict(color=COLORS['red'], width=1.5)
+    ))
     
-    Returns:
-        numpy.array: Array of monthly rent amounts
-    """
-    monthly_rents = np.zeros(months + 1)
-    monthly_rents[0] = initial_rent
+    fig.update_layout(
+        title='Buy vs. Rent Net Worth Comparison',
+        xaxis_title='Date',
+        yaxis_title='Net Worth ($)',
+        plot_bgcolor=COLORS['surface'],
+        paper_bgcolor=COLORS['surface'],
+        font=dict(color=COLORS['text']),
+        showlegend=True,
+        legend=dict(
+            yanchor="top",
+            y=0.99,
+            xanchor="left",
+            x=0.01
+        ),
+        hovermode='x unified'
+    )
     
-    for i in range(1, months + 1):
-        if i % 12 == 0:  # Increase rent yearly
-            monthly_rents[i] = monthly_rents[i-1] * (1 + annual_increase)
-        else:
-            monthly_rents[i] = monthly_rents[i-1]
-    
-    return monthly_rents
+    return fig
 
 app = Dash(__name__)
 
+# Styles
+STYLES = {
+    'container': {
+        'backgroundColor': COLORS['background'],
+        'minHeight': '100vh',
+        'padding': '20px',
+        'color': COLORS['text']
+    },
+    'input_container': {
+        'width': '25%',
+        'padding': '20px',
+        'backgroundColor': COLORS['surface'],
+        'borderRadius': '10px',
+        'marginRight': '20px'
+    },
+    'plot_container': {
+        'width': '75%',
+        'padding': '20px'
+    },
+    'section': {
+        'marginBottom': '20px'
+    },
+    'input_group': {
+        'marginBottom': '15px'
+    },
+    'label': {
+        'color': COLORS['text'],
+        'marginBottom': '5px'
+    }
+}
+
 app.layout = html.Div([
-    html.H1('Mortgage Cost Calculator', style={'color': 'white', 'textAlign': 'center'}),
+    html.H1('Buy vs. Rent Calculator', style={'textAlign': 'center', 'color': COLORS['text']}),
     
-    # Net Position Plot
+    # Main container
     html.Div([
-        dcc.Graph(id='net-position-plot', config={'modeBarButtonsToRemove': ['autoScale2d']})
-    ], style={'padding': '20px'}),
-    
-    html.Div([
-        # Left column for inputs
+        # Left column - Inputs
         html.Div([
-            # Mortgage section
-            html.H3('Mortgage Details', style={
-                'marginTop': '20px', 
-                'marginBottom': '10px',
-                'color': 'white'
-            }),
-            
-            html.Label('Home Price ($)'),
+            # Basic Inputs Section
             html.Div([
-                dcc.Input(id='home-price', type='number', value=375000, style={'width': '50%'}),
-                dcc.Slider(id='home-price-slider', min=100000, max=1000000, value=375000, 
-                          marks={i: f'${i:,}' for i in range(100000, 1100000, 200000)})
-            ]),
+                html.H3('Basic Information', style={'color': COLORS['text']}),
+                
+                html.Div([
+                    html.Label('Home Price ($)', style=STYLES['label']),
+                    dcc.Input(
+                        id='home-price-input',
+                        type='number',
+                        value=375000,
+                        style={'width': '100%', 'marginBottom': '5px'}
+                    ),
+                    dcc.Slider(
+                        id='home-price-slider',
+                        min=100000,
+                        max=1000000,
+                        value=375000,
+                        marks={i: f'${i:,}' for i in range(100000, 1100000, 200000)}
+                    )
+                ], style=STYLES['input_group']),
+                
+                html.Div([
+                    html.Label('Monthly Rent ($)', style=STYLES['label']),
+                    dcc.Input(
+                        id='monthly-rent-input',
+                        type='number',
+                        value=2000,
+                        style={'width': '100%', 'marginBottom': '5px'}
+                    ),
+                    dcc.Slider(
+                        id='monthly-rent-slider',
+                        min=500,
+                        max=5000,
+                        value=2000,
+                        marks={i: f'${i}' for i in range(500, 5500, 1000)}
+                    )
+                ], style=STYLES['input_group']),
+                
+                html.Div([
+                    html.Label('Time Horizon (years)', style=STYLES['label']),
+                    dcc.Input(
+                        id='years-input',
+                        type='number',
+                        value=30,
+                        style={'width': '100%', 'marginBottom': '5px'}
+                    ),
+                    dcc.Slider(
+                        id='years-slider',
+                        min=5,
+                        max=30,
+                        value=30,
+                        marks={i: f'{i}y' for i in range(5, 35, 5)}
+                    )
+                ], style=STYLES['input_group'])
+            ], style=STYLES['section']),
             
-            html.Label('Down Payment ($)'),
+            # Mortgage Details Section
             html.Div([
-                dcc.Input(id='down-payment', type='number', value=75000, style={'width': '50%'}),
-                dcc.Slider(id='down-payment-slider', min=0, max=200000, value=75000,
-                          marks={i: f'${i:,}' for i in range(0, 220000, 40000)})
-            ]),
+                html.H3('Mortgage Details', style={'color': COLORS['text']}),
+                
+                html.Div([
+                    html.Label('Down Payment ($)', style=STYLES['label']),
+                    dcc.Input(
+                        id='down-payment-input',
+                        type='number',
+                        value=75000,
+                        style={'width': '100%', 'marginBottom': '5px'}
+                    ),
+                    dcc.Slider(
+                        id='down-payment-slider',
+                        min=0,
+                        max=200000,
+                        value=75000,
+                        marks={i: f'${i:,}' for i in range(0, 220000, 40000)}
+                    )
+                ], style=STYLES['input_group']),
+                
+                html.Div([
+                    html.Label('Mortgage Rate (%)', style=STYLES['label']),
+                    dcc.Input(
+                        id='mortgage-rate-input',
+                        type='number',
+                        value=6.5,
+                        style={'width': '100%', 'marginBottom': '5px'}
+                    ),
+                    dcc.Slider(
+                        id='mortgage-rate-slider',
+                        min=2,
+                        max=10,
+                        value=6.5,
+                        step=0.1,
+                        marks={i: f'{i}%' for i in range(2, 11, 2)}
+                    )
+                ], style=STYLES['input_group'])
+            ], style=STYLES['section']),
             
-            html.Label('Annual Interest Rate (%)'),
+            # Future Projections Section
             html.Div([
-                dcc.Input(id='interest-rate', type='number', value=5, style={'width': '50%'}),
-                dcc.Slider(id='interest-rate-slider', min=0, max=10, value=5, step=0.1,
-                          marks={i: f'{i}%' for i in range(0, 11, 2)})
-            ]),
-            
-            html.Label('Loan Term (years)'),
-            dcc.Dropdown(
-                id='loan-term',
-                options=[
-                    {'label': '15 years', 'value': 15},
-                    {'label': '20 years', 'value': 20},
-                    {'label': '25 years', 'value': 25},
-                    {'label': '30 years', 'value': 30}
-                ],
-                value=30
-            ),
-            
-            html.Label('Annual Home Appreciation (%)'),
-            html.Div([
-                dcc.Input(id='home-appreciation', type='number', value=3, style={'width': '50%'}),
-                dcc.Slider(id='home-appreciation-slider', min=0, max=10, value=3, step=0.1,
-                          marks={i: f'{i}%' for i in range(0, 11, 2)})
-            ]),
-            
-            html.Label('Monthly Home Expenses ($)'),
-            html.Div([
-                dcc.Input(id='home-expenses', type='number', value=500, style={'width': '50%'}),
-                dcc.Slider(id='home-expenses-slider', min=0, max=2000, value=500,
-                          marks={i: f'${i}' for i in range(0, 2200, 400)})
-            ]),
-            
-            # Rent comparison section
-            html.H3('Rent Comparison', style={
-                'marginTop': '30px', 
-                'marginBottom': '10px',
-                'color': 'white'
-            }),
-            
-            html.Label('Monthly Rent ($)'),
-            html.Div([
-                dcc.Input(id='monthly-rent', type='number', value=2000, style={'width': '50%'}),
-                dcc.Slider(id='monthly-rent-slider', min=500, max=5000, value=2000,
-                          marks={i: f'${i}' for i in range(500, 5500, 1000)})
-            ]),
-            
-            html.Label('Annual Rent Increase (%)'),
-            html.Div([
-                dcc.Input(id='rent-increase', type='number', value=3, style={'width': '50%'}),
-                dcc.Slider(id='rent-increase-slider', min=0, max=10, value=3, step=0.1,
-                          marks={i: f'{i}%' for i in range(0, 11, 2)})
-            ]),
-            
-            html.Label('Monthly Rental Expenses ($)'),
-            html.Div([
-                dcc.Input(id='rent-expenses', type='number', value=200, style={'width': '50%'}),
-                dcc.Slider(id='rent-expenses-slider', min=0, max=1000, value=200,
-                          marks={i: f'${i}' for i in range(0, 1100, 200)})
-            ]),
-            
-            html.Label('Investment Return Rate (%)'),
-            html.Div([
-                dcc.Input(id='investment-rate', type='number', value=7, style={'width': '50%'}),
-                dcc.Slider(id='investment-rate-slider', min=0, max=15, value=7, step=0.1,
-                          marks={i: f'{i}%' for i in range(0, 16, 3)})
-            ]),
-        ], style={
-            'width': '25%',
-            'padding': '20px',
-            'display': 'flex',
-            'flexDirection': 'column',
-            'gap': '10px',
-            'backgroundColor': '#2b2b2b',
-            'borderRadius': '10px'
-        }),
+                html.H3('Future Projections', style={'color': COLORS['text']}),
+                
+                html.Div([
+                    html.Label('Home Appreciation (%)', style=STYLES['label']),
+                    dcc.Input(
+                        id='home-appreciation-input',
+                        type='number',
+                        value=3,
+                        style={'width': '100%', 'marginBottom': '5px'}
+                    ),
+                    dcc.Slider(
+                        id='home-appreciation-slider',
+                        min=0,
+                        max=8,
+                        value=3,
+                        step=0.1,
+                        marks={i: f'{i}%' for i in range(0, 9, 2)}
+                    )
+                ], style=STYLES['input_group']),
+                
+                html.Div([
+                    html.Label('Rent Appreciation (%)', style=STYLES['label']),
+                    dcc.Input(
+                        id='rent-appreciation-input',
+                        type='number',
+                        value=3,
+                        style={'width': '100%', 'marginBottom': '5px'}
+                    ),
+                    dcc.Slider(
+                        id='rent-appreciation-slider',
+                        min=0,
+                        max=8,
+                        value=3,
+                        step=0.1,
+                        marks={i: f'{i}%' for i in range(0, 9, 2)}
+                    )
+                ], style=STYLES['input_group']),
+                
+                html.Div([
+                    html.Label('Investment Return (%)', style=STYLES['label']),
+                    dcc.Input(
+                        id='investment-return-input',
+                        type='number',
+                        value=7,
+                        style={'width': '100%', 'marginBottom': '5px'}
+                    ),
+                    dcc.Slider(
+                        id='investment-return-slider',
+                        min=0,
+                        max=12,
+                        value=7,
+                        step=0.1,
+                        marks={i: f'{i}%' for i in range(0, 13, 3)}
+                    )
+                ], style=STYLES['input_group'])
+            ], style=STYLES['section'])
+        ], style=STYLES['input_container']),
         
-        # Right column for plots
+        # Right column - Plot
         html.Div([
-            dcc.Graph(id='mortgage-plot', config={'modeBarButtonsToRemove': ['autoScale2d']}),
-            dcc.Graph(id='rent-vs-buy-plot', config={'modeBarButtonsToRemove': ['autoScale2d']})
-        ], style={
-            'width': '75%',
-            'padding': '20px'
-        })
-    ], style={
-        'display': 'flex',
-        'flexDirection': 'row'
-    })
-], style={
-    'backgroundColor': '#1f1f1f',
-    'minHeight': '100vh',
-    'padding': '20px'
-})
+            dcc.Graph(id='comparison-plot')
+        ], style=STYLES['plot_container'])
+    ], style={'display': 'flex', 'flexDirection': 'row'})
+], style=STYLES['container'])
 
-@app.callback(
-    [Output('net-position-plot', 'figure'),
-     Output('mortgage-plot', 'figure'),
-     Output('rent-vs-buy-plot', 'figure')],
-    [Input('home-price', 'value'),
-     Input('down-payment', 'value'),
-     Input('interest-rate', 'value'),
-     Input('loan-term', 'value'),
-     Input('home-appreciation', 'value'),
-     Input('home-expenses', 'value'),
-     Input('monthly-rent', 'value'),
-     Input('rent-increase', 'value'),
-     Input('rent-expenses', 'value'),
-     Input('investment-rate', 'value'),
-     Input('mortgage-plot', 'relayoutData'),
-     Input('rent-vs-buy-plot', 'relayoutData'),
-     Input('net-position-plot', 'relayoutData')]
-)
-def update_graphs(home_price, down_payment, interest_rate, loan_term, 
-                 home_appreciation, home_expenses, monthly_rent, 
-                 rent_increase, rent_expenses, investment_rate,
-                 mortgage_relayout, rent_relayout, net_relayout):
-    if not all([home_price, down_payment, interest_rate, loan_term, 
-                home_appreciation, monthly_rent, rent_increase, investment_rate]):
-        return go.Figure(), go.Figure(), go.Figure()
-    
-    # First plot calculations
-    loan_amount = home_price - down_payment
-    annual_rate = interest_rate / 100
-    monthly_payment = calculate_mortgage_payment(loan_amount, annual_rate, loan_term)
-    months, balance, interest_paid, cumulative_payments = calculate_mortgage_data(
-        loan_amount, annual_rate, loan_term, monthly_payment
-    )
-    
-    # Calculate home value appreciation
-    home_values = calculate_home_value(home_price, home_appreciation/100, len(months)-1)
-    
-    # Calculate equity including appreciation
-    equity = np.zeros(len(months))
-    equity[0] = down_payment
-    equity[1:] = home_values[1:] - balance[1:]
-    
-    # Add home expenses to cumulative payments
-    cumulative_home_expenses = months * home_expenses
-    total_home_costs = cumulative_payments + cumulative_home_expenses
-    
-    # Calculate monthly rent with annual increases
-    monthly_rents = calculate_monthly_rent(monthly_rent, rent_increase/100, len(months)-1)
-    cumulative_rent = np.cumsum(monthly_rents)
-    
-    # Add rental expenses
-    cumulative_rent_expenses = months * rent_expenses
-    total_rent_costs = cumulative_rent + cumulative_rent_expenses
-    
-    # Calculate investment opportunity (down payment + monthly savings)
-    monthly_investment = monthly_rents + rent_expenses - (monthly_payment + home_expenses)
-    investment_return = investment_rate / 100
-    
-    investment_value = calculate_investment_growth(
-        np.mean(monthly_investment),
-        down_payment, 
-        investment_return, 
-        len(months) - 1
-    )
-    
-    # Calculate net position (investment minus total rent costs)
-    net_position = investment_value - total_rent_costs
-    
-    dates = [pd.Timestamp.now() + pd.DateOffset(months=int(m)) for m in months]
-    
-    # Get the date range from whichever plot was updated
-    xaxis_range = None
-    ctx_trigger = ctx.triggered[0]['prop_id'].split('.')[0] if ctx.triggered else None
-    
-    if ctx_trigger in ['mortgage-plot', 'rent-vs-buy-plot', 'net-position-plot'] and ctx.triggered[0]['value']:
-        relayout_data = ctx.triggered[0]['value']
-        if 'xaxis.range[0]' in relayout_data:
-            xaxis_range = [
-                relayout_data['xaxis.range[0]'],
-                relayout_data['xaxis.range[1]']
-            ]
-    
-    # Create dark theme template
-    dark_template = dict(
-        plot_bgcolor='#2b2b2b',
-        paper_bgcolor='#2b2b2b',
-        font=dict(color='white'),
-        xaxis=dict(
-            gridcolor='#404040',
-            tickformat='%b %Y',
-            tickangle=45,
-            range=xaxis_range
-        ),
-        yaxis=dict(
-            gridcolor='#404040',
-            fixedrange=True
+def create_callbacks(app):
+    def create_sync_callback(param):
+        @app.callback(
+            [Output(f'{param}-input', 'value'),
+             Output(f'{param}-slider', 'value')],
+            [Input(f'{param}-input', 'value'),
+             Input(f'{param}-slider', 'value')],
+            prevent_initial_call=True
         )
+        def sync_values(input_value, slider_value):
+            # Get the ID of the component that triggered the callback
+            triggered_id = dash.callback_context.triggered[0]['prop_id'].split('.')[0]
+            
+            if triggered_id == f'{param}-input':
+                return input_value, input_value
+            return slider_value, slider_value
+
+    # Create sync callbacks for each parameter
+    params = ['home-price', 'monthly-rent', 'years', 'down-payment', 
+              'mortgage-rate', 'home-appreciation', 'rent-appreciation', 
+              'investment-return']
+    
+    for param in params:
+        create_sync_callback(param)
+
+    @app.callback(
+        Output('comparison-plot', 'figure'),
+        [Input(f'{param}-input', 'value') for param in params]
     )
-    
-    # Net Position Plot
-    fig_net = go.Figure()
-    fig_net.add_trace(go.Scatter(
-        x=dates,
-        y=net_position,
-        name='Net Position',
-        mode='lines+markers',
-        line=dict(color='#00ff00', width=3)
-    ))
-    
-    fig_net.update_layout(
-        title='Net Position Over Time',
-        xaxis_title='Date',
-        yaxis_title='Amount ($)',
-        hovermode='x unified',
-        showlegend=True,
-        legend=dict(
-            yanchor="top",
-            y=0.99,
-            xanchor="left",
-            x=0.01
-        ),
-        dragmode='zoom',
-        **dark_template
-    )
-    
-    # First figure
-    fig1 = go.Figure()
-    fig1.add_trace(go.Scatter(x=dates, y=balance, name='Principal Balance', mode='lines+markers'))
-    fig1.add_trace(go.Scatter(x=dates, y=interest_paid, name='Cumulative Interest', mode='lines+markers'))
-    fig1.add_trace(go.Scatter(x=dates, y=cumulative_payments, name='Monthly Payments', mode='lines+markers'))
-    fig1.add_trace(go.Scatter(x=dates, y=cumulative_home_expenses, name='Home Expenses', mode='lines+markers'))
-    fig1.add_trace(go.Scatter(x=dates, y=total_home_costs, name='Total Costs (incl. Expenses)', mode='lines+markers'))
-    fig1.add_trace(go.Scatter(x=dates, y=equity, name='Home Equity', mode='lines+markers'))
-    fig1.add_trace(go.Scatter(x=dates, y=home_values, name='Home Value', mode='lines+markers'))
-    
-    fig1.update_layout(
-        title='Mortgage Costs Over Time',
-        xaxis_title='Date',
-        yaxis_title='Amount ($)',
-        hovermode='x unified',
-        showlegend=True,
-        legend=dict(
-            yanchor="top",
-            y=0.99,
-            xanchor="left",
-            x=0.01
-        ),
-        dragmode='zoom',
-        **dark_template
-    )
-    
-    # Second figure
-    fig2 = go.Figure()
-    fig2.add_trace(go.Scatter(x=dates, y=cumulative_rent, name='Cumulative Rent', mode='lines+markers'))
-    fig2.add_trace(go.Scatter(x=dates, y=cumulative_rent_expenses, name='Rental Expenses', mode='lines+markers'))
-    fig2.add_trace(go.Scatter(x=dates, y=total_rent_costs, name='Total Rent Costs (incl. Expenses)', mode='lines+markers'))
-    fig2.add_trace(go.Scatter(x=dates, y=investment_value, name='Investment Value', mode='lines+markers'))
-    
-    fig2.update_layout(
-        title='Rent vs. Buy Comparison',
-        xaxis_title='Date',
-        yaxis_title='Amount ($)',
-        hovermode='x unified',
-        showlegend=True,
-        legend=dict(
-            yanchor="top",
-            y=0.99,
-            xanchor="left",
-            x=0.01
-        ),
-        dragmode='zoom',
-        **dark_template
-    )
-    
-    return fig_net, fig1, fig2
-
-# Replace the individual callbacks with this pattern-matching callback
-@app.callback(
-    Output('home-price', 'value'),
-    Output('home-price-slider', 'value'),
-    Input('home-price', 'value'),
-    Input('home-price-slider', 'value'),
-    prevent_initial_call=True
-)
-def sync_home_price(input_value, slider_value):
-    trigger_id = ctx.triggered[0]["prop_id"].split(".")[0]
-    if trigger_id == "home-price":
-        return input_value, input_value
-    else:
-        return slider_value, slider_value
-
-@app.callback(
-    Output('down-payment', 'value'),
-    Output('down-payment-slider', 'value'),
-    Input('down-payment', 'value'),
-    Input('down-payment-slider', 'value'),
-    prevent_initial_call=True
-)
-def sync_down_payment(input_value, slider_value):
-    trigger_id = ctx.triggered[0]["prop_id"].split(".")[0]
-    if trigger_id == "down-payment":
-        return input_value, input_value
-    else:
-        return slider_value, slider_value
-
-@app.callback(
-    Output('interest-rate', 'value'),
-    Output('interest-rate-slider', 'value'),
-    Input('interest-rate', 'value'),
-    Input('interest-rate-slider', 'value'),
-    prevent_initial_call=True
-)
-def sync_interest_rate(input_value, slider_value):
-    trigger_id = ctx.triggered[0]["prop_id"].split(".")[0]
-    if trigger_id == "interest-rate":
-        return input_value, input_value
-    else:
-        return slider_value, slider_value
-
-@app.callback(
-    Output('home-appreciation', 'value'),
-    Output('home-appreciation-slider', 'value'),
-    Input('home-appreciation', 'value'),
-    Input('home-appreciation-slider', 'value'),
-    prevent_initial_call=True
-)
-def sync_home_appreciation(input_value, slider_value):
-    trigger_id = ctx.triggered[0]["prop_id"].split(".")[0]
-    if trigger_id == "home-appreciation":
-        return input_value, input_value
-    else:
-        return slider_value, slider_value
-
-@app.callback(
-    Output('home-expenses', 'value'),
-    Output('home-expenses-slider', 'value'),
-    Input('home-expenses', 'value'),
-    Input('home-expenses-slider', 'value'),
-    prevent_initial_call=True
-)
-def sync_home_expenses(input_value, slider_value):
-    trigger_id = ctx.triggered[0]["prop_id"].split(".")[0]
-    if trigger_id == "home-expenses":
-        return input_value, input_value
-    else:
-        return slider_value, slider_value
-
-@app.callback(
-    Output('monthly-rent', 'value'),
-    Output('monthly-rent-slider', 'value'),
-    Input('monthly-rent', 'value'),
-    Input('monthly-rent-slider', 'value'),
-    prevent_initial_call=True
-)
-def sync_monthly_rent(input_value, slider_value):
-    trigger_id = ctx.triggered[0]["prop_id"].split(".")[0]
-    if trigger_id == "monthly-rent":
-        return input_value, input_value
-    else:
-        return slider_value, slider_value
-
-@app.callback(
-    Output('rent-increase', 'value'),
-    Output('rent-increase-slider', 'value'),
-    Input('rent-increase', 'value'),
-    Input('rent-increase-slider', 'value'),
-    prevent_initial_call=True
-)
-def sync_rent_increase(input_value, slider_value):
-    trigger_id = ctx.triggered[0]["prop_id"].split(".")[0]
-    if trigger_id == "rent-increase":
-        return input_value, input_value
-    else:
-        return slider_value, slider_value
-
-@app.callback(
-    Output('rent-expenses', 'value'),
-    Output('rent-expenses-slider', 'value'),
-    Input('rent-expenses', 'value'),
-    Input('rent-expenses-slider', 'value'),
-    prevent_initial_call=True
-)
-def sync_rent_expenses(input_value, slider_value):
-    trigger_id = ctx.triggered[0]["prop_id"].split(".")[0]
-    if trigger_id == "rent-expenses":
-        return input_value, input_value
-    else:
-        return slider_value, slider_value
-
-@app.callback(
-    Output('investment-rate', 'value'),
-    Output('investment-rate-slider', 'value'),
-    Input('investment-rate', 'value'),
-    Input('investment-rate-slider', 'value'),
-    prevent_initial_call=True
-)
-def sync_investment_rate(input_value, slider_value):
-    trigger_id = ctx.triggered[0]["prop_id"].split(".")[0]
-    if trigger_id == "investment-rate":
-        return input_value, input_value
-    else:
-        return slider_value, slider_value
+    def update_plot(home_price, monthly_rent, years, down_payment,
+                   mortgage_rate, home_appreciation, rent_appreciation,
+                   investment_return):
+        if not all([home_price, monthly_rent, years, down_payment,
+                    mortgage_rate, home_appreciation, rent_appreciation,
+                    investment_return]):
+            return go.Figure()
+        
+        # Calculate down payment percentage
+        down_payment_pct = (down_payment / home_price * 100) if home_price else 0
+        
+        return calculate_buy_vs_rent(
+            home_price=home_price,
+            monthly_rent=monthly_rent,
+            years=years,
+            down_payment_pct=down_payment_pct,
+            mortgage_rate=mortgage_rate,
+            home_appreciation=home_appreciation,
+            rent_appreciation=rent_appreciation,
+            investment_return=investment_return
+        )
 
 if __name__ == '__main__':
+    create_callbacks(app)
     app.run_server(debug=True)
-
