@@ -1,2 +1,2 @@
 # rob
-Personal rent vs buy CBA
+Personal rent vs buy CBA, not responsible for any errors.

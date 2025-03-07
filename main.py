@@ -3,6 +3,9 @@ import pandas as pd
 import plotly.graph_objects as go
 from dash import Dash, dcc, html, Input, Output
 import dash
+from dash.dependencies import Input, Output, State
+import plotly.express as px
+import argparse
 
 # Constants for Gruvbox theme
 COLORS = {
@@ -14,6 +17,12 @@ COLORS = {
     'red': '#fb4934',
     'yellow': '#fabd2f'
 }
+
+def parse_args():
+    parser = argparse.ArgumentParser(description='Run the mortgage calculator dashboard')
+    parser.add_argument('--debug', action='store_true', default=False,
+                       help='Run the app in debug mode')
+    return parser.parse_args()
 
 def calculate_buy_vs_rent(
     # Basic inputs
@@ -36,7 +45,7 @@ def calculate_buy_vs_rent(
     filing_status="individual",
     other_itemized_deductions=0,
     # Closing costs
-    buying_closing_cost_pct=4,
+    buying_closing_cost_pct=3,
     selling_closing_cost_pct=6,
     # Maintenance and fees
     maintenance_pct=1,
@@ -210,6 +219,192 @@ def calculate_buy_vs_rent(
     
     return fig
 
+def calculate_mortgage_details(loan_amount, annual_rate, term_years):
+    """
+    Calculate detailed mortgage payment breakdown over time.
+    Source: https://www.mortgagenewsdaily.com/mortgage-calculator
+    """
+    monthly_rate = annual_rate / 100 / 12
+    n_payments = term_years * 12
+    
+    # Calculate monthly P&I payment
+    monthly_payment = (loan_amount * 
+                      (monthly_rate * (1 + monthly_rate)**n_payments) / 
+                      ((1 + monthly_rate)**n_payments - 1))
+    
+    # Initialize arrays
+    months = np.arange(n_payments + 1)
+    balance = np.zeros(len(months))
+    interest_paid = np.zeros(len(months))
+    principal_paid = np.zeros(len(months))
+    
+    # Initial balance
+    balance[0] = loan_amount
+    
+    # Calculate amortization schedule
+    for i in range(1, len(months)):
+        month_interest = balance[i-1] * monthly_rate
+        month_principal = monthly_payment - month_interest
+        interest_paid[i] = interest_paid[i-1] + month_interest
+        principal_paid[i] = principal_paid[i-1] + month_principal
+        balance[i] = balance[i-1] - month_principal
+    
+    return {
+        'monthly_payment': monthly_payment,
+        'balance': balance,
+        'interest_paid': interest_paid,
+        'principal_paid': principal_paid,
+        'months': months
+    }
+
+def create_total_cost_chart(mortgage_details):
+    """Create stacked area chart showing total cost breakdown."""
+    fig = go.Figure()
+    
+    # Create date range for x-axis
+    start_date = pd.Timestamp.now().replace(day=1)
+    dates = pd.date_range(
+        start=start_date,
+        periods=len(mortgage_details['months']),
+        freq='M'
+    )
+    
+    # Add principal paid area
+    fig.add_trace(go.Scatter(
+        x=dates,
+        y=mortgage_details['principal_paid'],
+        name='Principal Paid',
+        fill='tonexty',
+        line=dict(color=COLORS['green'], width=1.5)
+    ))
+    
+    # Add interest paid area
+    fig.add_trace(go.Scatter(
+        x=dates,
+        y=mortgage_details['interest_paid'],
+        name='Interest Paid',
+        fill='tonexty',
+        line=dict(color=COLORS['red'], width=1.5)
+    ))
+    
+    # Add remaining balance line
+    fig.add_trace(go.Scatter(
+        x=dates,
+        y=mortgage_details['balance'],
+        name='Remaining Balance',
+        line=dict(color=COLORS['blue'], width=1.5, dash='dash')
+    ))
+    
+    fig.update_layout(
+        title='Total Cost of Mortgage',
+        xaxis_title='Date',
+        yaxis_title='Amount ($)',
+        plot_bgcolor=COLORS['surface'],
+        paper_bgcolor=COLORS['surface'],
+        font=dict(color=COLORS['text']),
+        showlegend=True,
+        height=400,
+        hovermode='x unified',
+        xaxis=dict(
+            tickformat='%b %Y',
+            tickangle=45,
+            showgrid=True,
+            gridcolor='rgba(128, 128, 128, 0.2)'
+        ),
+        yaxis=dict(
+            showgrid=True,
+            gridcolor='rgba(128, 128, 128, 0.2)'
+        )
+    )
+    
+    # Format the hover template
+    fig.update_traces(
+        hovertemplate="%{x|%b %Y}<br>" +
+                     "%{y:$,.0f}<br>" +
+                     "<extra>%{fullData.name}</extra>"
+    )
+    
+    return fig
+
+def calculate_monthly_costs(mortgage_details, home_price, selected_month):
+    """Calculate the breakdown of monthly costs for a specific month."""
+    monthly_payment = mortgage_details['monthly_payment']
+    monthly_rate = mortgage_details['interest_paid'][1] / mortgage_details['balance'][0]  # Get actual monthly rate
+    
+    # Calculate interest for the specific month
+    current_balance = mortgage_details['balance'][selected_month]
+    interest = current_balance * monthly_rate
+    
+    # Principal is the remainder of the monthly payment
+    principal = monthly_payment - interest
+    
+    # Monthly tax and insurance
+    property_tax = (home_price * 0.011) / 12  # Assuming 1.1% annual property tax
+    insurance = (home_price * 0.005) / 12     # Assuming 0.5% annual insurance
+    
+    return {
+        'Principal': principal,
+        'Interest': interest,
+        'Property Tax': property_tax,
+        'Insurance': insurance
+    }
+
+def create_payment_breakdown_chart(mortgage_details, home_price, selected_month):
+    """Create bar chart showing single month payment breakdown."""
+    costs = calculate_monthly_costs(mortgage_details, home_price, selected_month)
+    
+    # Calculate total payment
+    total_payment = sum(costs.values())
+    
+    # Create the bar chart
+    fig = go.Figure()
+    
+    # Add bars for each component
+    components = ['Principal', 'Interest', 'Property Tax', 'Insurance']
+    colors = [COLORS['green'], COLORS['red'], COLORS['blue'], COLORS['yellow']]
+    
+    for component, color in zip(components, colors):
+        fig.add_trace(go.Bar(
+            name=component,
+            x=['Monthly Payment'],
+            y=[costs[component]],
+            marker_color=color
+        ))
+    
+    fig.update_layout(
+        plot_bgcolor=COLORS['surface'],
+        paper_bgcolor=COLORS['surface'],
+        font=dict(color=COLORS['text']),
+        height=400,
+        barmode='stack',
+        showlegend=False,
+        yaxis=dict(
+            showgrid=True,
+            gridcolor='rgba(128, 128, 128, 0.2)'
+        ),
+        margin=dict(t=20, l=50, r=20, b=20),
+        annotations=[
+            dict(
+                text=f'Total Payment: ${total_payment:,.2f}',
+                xref='paper',
+                yref='paper',
+                x=0.5,
+                y=1.05,
+                showarrow=False,
+                font=dict(size=16, color=COLORS['text'])
+            )
+        ]
+    )
+    
+    # Format the hover template
+    fig.update_traces(
+        hovertemplate="%{data.name}<br>" +
+                     "$%{y:,.2f}<br>" +
+                     "<extra></extra>"
+    )
+    
+    return fig
+
 app = Dash(__name__)
 
 # Styles
@@ -328,6 +523,38 @@ app.layout = html.Div([
                 ], style=STYLES['input_group']),
                 
                 html.Div([
+                    html.Label('Closing Costs ($)', style=STYLES['label']),
+                    dcc.Input(
+                        id='closing-costs-input',
+                        type='number',
+                        value=11250,
+                        style={'width': '100%', 'marginBottom': '5px'}
+                    ),
+                    dcc.Slider(
+                        id='closing-costs-slider',
+                        min=0,
+                        max=30000,
+                        value=11250,
+                        marks={i: f'${i:,}' for i in range(0, 35000, 5000)}
+                    )
+                ], style=STYLES['input_group']),
+                
+                html.Div([
+                    html.Label('Mortgage Term (years)', style=STYLES['label']),
+                    dcc.Dropdown(
+                        id='mortgage-term-input',
+                        options=[
+                            {'label': '15 Year Fixed', 'value': 15},
+                            {'label': '20 Year Fixed', 'value': 20},
+                            {'label': '25 Year Fixed', 'value': 25},
+                            {'label': '30 Year Fixed', 'value': 30}
+                        ],
+                        value=30,
+                        style={'width': '100%', 'color': COLORS['background']}
+                    )
+                ], style=STYLES['input_group']),
+                
+                html.Div([
                     html.Label('Mortgage Rate (%)', style=STYLES['label']),
                     dcc.Input(
                         id='mortgage-rate-input',
@@ -406,9 +633,42 @@ app.layout = html.Div([
             ], style=STYLES['section'])
         ], style=STYLES['input_container']),
         
-        # Right column - Plot
+        # Right column - Charts
         html.Div([
-            dcc.Graph(id='comparison-plot')
+            # Main buy vs rent plot
+            html.Div([
+                dcc.Graph(
+                    id='comparison-plot',
+                    style={'height': '600px'}
+                )
+            ], style={'marginBottom': '20px'}),
+            
+            # Bottom row with cost charts
+            html.Div([
+                # Left side - Total cost chart
+                html.Div([
+                    dcc.Graph(id='total-cost-plot'),
+                    html.Div(style={'height': '50px'})  # Spacer for alignment
+                ], style={'width': '70%', 'display': 'inline-block'}),
+                
+                # Right side - Payment breakdown chart and selector
+                html.Div([
+                    dcc.Graph(
+                        id='payment-breakdown-plot',
+                        style={'marginBottom': '10px'}
+                    ),
+                    dcc.Dropdown(
+                        id='month-selector',
+                        options=[],  # Will be populated in callback
+                        value=1,
+                        style={
+                            'width': '100%',
+                            'color': COLORS['background'],
+                            'backgroundColor': COLORS['surface']
+                        }
+                    )
+                ], style={'width': '30%', 'display': 'inline-block'})
+            ], style={'display': 'flex', 'flexDirection': 'row'})
         ], style=STYLES['plot_container'])
     ], style={'display': 'flex', 'flexDirection': 'row'})
 ], style=STYLES['container'])
@@ -423,7 +683,6 @@ def create_callbacks(app):
             prevent_initial_call=True
         )
         def sync_values(input_value, slider_value):
-            # Get the ID of the component that triggered the callback
             triggered_id = dash.callback_context.triggered[0]['prop_id'].split('.')[0]
             
             if triggered_id == f'{param}-input':
@@ -433,37 +692,79 @@ def create_callbacks(app):
     # Create sync callbacks for each parameter
     params = ['home-price', 'monthly-rent', 'years', 'down-payment', 
               'mortgage-rate', 'home-appreciation', 'rent-appreciation', 
-              'investment-return']
+              'investment-return', 'closing-costs']
     
     for param in params:
         create_sync_callback(param)
 
     @app.callback(
-        Output('comparison-plot', 'figure'),
-        [Input(f'{param}-input', 'value') for param in params]
+        Output('month-selector', 'options'),
+        [Input('mortgage-term-input', 'value')]
     )
-    def update_plot(home_price, monthly_rent, years, down_payment,
-                   mortgage_rate, home_appreciation, rent_appreciation,
-                   investment_return):
+    def update_month_options(mortgage_term):
+        if not mortgage_term:
+            return []
+        
+        # Create date options for dropdown
+        dates = pd.date_range(
+            start=pd.Timestamp.now().replace(day=1),
+            periods=mortgage_term * 12,
+            freq='M'
+        )
+        
+        return [{'label': date.strftime('%b %Y'), 'value': i} 
+                for i, date in enumerate(dates)]
+
+    @app.callback(
+        [Output('comparison-plot', 'figure'),
+         Output('total-cost-plot', 'figure'),
+         Output('payment-breakdown-plot', 'figure')],
+        [Input(f'{param}-input', 'value') for param in params] +
+        [Input('mortgage-term-input', 'value'),
+         Input('month-selector', 'value')]
+    )
+    def update_plots(home_price, monthly_rent, years, down_payment,
+                    mortgage_rate, home_appreciation, rent_appreciation,
+                    investment_return, closing_costs, mortgage_term,
+                    selected_month):
         if not all([home_price, monthly_rent, years, down_payment,
                     mortgage_rate, home_appreciation, rent_appreciation,
-                    investment_return]):
-            return go.Figure()
+                    investment_return, closing_costs, mortgage_term]):
+            return go.Figure(), go.Figure(), go.Figure()
         
-        # Calculate down payment percentage
-        down_payment_pct = (down_payment / home_price * 100) if home_price else 0
+        selected_month = selected_month or 0  # Default to first month if None
         
-        return calculate_buy_vs_rent(
+        # Calculate loan details
+        loan_amount = home_price - down_payment
+        mortgage_details = calculate_mortgage_details(
+            loan_amount, mortgage_rate, mortgage_term
+        )
+        
+        # Create the plots
+        comparison_fig = calculate_buy_vs_rent(
             home_price=home_price,
             monthly_rent=monthly_rent,
             years=years,
-            down_payment_pct=down_payment_pct,
+            down_payment_pct=(down_payment / home_price * 100),
             mortgage_rate=mortgage_rate,
+            mortgage_term=mortgage_term,
             home_appreciation=home_appreciation,
             rent_appreciation=rent_appreciation,
-            investment_return=investment_return
+            investment_return=investment_return,
+            buying_closing_cost_pct=(closing_costs / home_price * 100)
         )
+        
+        total_cost_fig = create_total_cost_chart(mortgage_details)
+        payment_breakdown_fig = create_payment_breakdown_chart(
+            mortgage_details, 
+            home_price,
+            selected_month
+        )
+        
+        return comparison_fig, total_cost_fig, payment_breakdown_fig
 
 if __name__ == '__main__':
+    import dash
+    args = parse_args()
     create_callbacks(app)
-    app.run_server(debug=True)
+    app.run_server(debug=args.debug)
